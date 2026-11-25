@@ -60,10 +60,63 @@ AUDIT_BASE = os.getenv("AUDIT_BASE", "main")
 PR_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 
 QUEUE: "queue.Queue[tuple]" = queue.Queue()  # (function, *args)
+QUEUE_FILE = DATA / "queue.json"
+FILA_LOCK = threading.Lock()
+MIRROR_LOCK = threading.Lock()  # fetch no espelho é o único passo compartilhado entre workers
+ANDAMENTO: dict[str, float] = {}
+ANDAMENTO_LOCK = threading.Lock()
+WORKERS = max(1, int(os.getenv("WORKERS", "1")))
 
 
 def log(msg: str):
     print(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
+
+
+def salva_fila() -> None:
+    """Fila em disco: reinício do container não perde push já recebido (webhook não é reenviado)."""
+    with FILA_LOCK:
+        dados = [{"funcao": f.__name__, "args": list(a)} for f, *a in list(QUEUE.queue)]
+        tmp = QUEUE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(QUEUE_FILE)
+
+
+def enfileira(funcao, *args) -> None:
+    QUEUE.put((funcao, *args))
+    salva_fila()
+
+
+def carrega_fila() -> int:
+    """Devolve à fila o que ficou pendente do processo anterior."""
+    if not QUEUE_FILE.exists():
+        return 0
+    try:
+        itens = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+    except Exception as e:  # arquivo corrompido não impede subir
+        log(f"fila em disco ilegível ({e}); seguindo vazio")
+        itens = []
+    for item in itens:
+        funcao = {"review_commit": review_commit, "review_pr": review_pr}.get(item.get("funcao"))
+        args = item.get("args", [])
+        if funcao is review_commit and not (len(args) >= 2 and SHA.match(str(args[1]))):
+            log(f"fila em disco: entrada descartada, sha inválido ({args[1:2]})")
+            continue
+        if funcao:
+            QUEUE.put((funcao, *args))
+    QUEUE_FILE.unlink(missing_ok=True)
+    return QUEUE.qsize()
+
+
+def estado(ultimo: str | None = None) -> dict:
+    with ANDAMENTO_LOCK:
+        em_andamento = {k: round(time.monotonic() - v) for k, v in ANDAMENTO.items()}
+    indice = DATA / "reports" / "index.md"
+    linha = ultimo
+    if linha is None and indice.exists():
+        linhas = [l for l in indice.read_text(encoding="utf-8").splitlines() if l.strip()]
+        linha = linhas[-1] if linhas else None
+    return {"ok": True, "model": MODEL, "workers": WORKERS, "queue": QUEUE.qsize(),
+            "running": em_andamento, "last": linha}
 
 
 # ---------- pure functions (tested in test_app.py) ----------
@@ -336,7 +389,8 @@ def review_commit(repo: str, sha: str, clone_url: str):
         return
     status(repo, sha, "pending", f"reviewing with {MODEL}")
     usage = Usage()
-    root = mirror(repo, clone_url)
+    with MIRROR_LOCK:
+        root = mirror(repo, clone_url)
     with tempfile.TemporaryDirectory() as tmp:
         wt = Path(tmp) / "wt"
         git("worktree", "add", "--detach", str(wt), sha, cwd=root)
@@ -388,7 +442,8 @@ def review_pr(repo: str, number: int, head: str, base: str, clone_url: str):
         return
     status(repo, head, "pending", f"auditing with {MODEL}", CONTEXT_PR)
     usage = Usage()
-    root = mirror(repo, clone_url)
+    with MIRROR_LOCK:
+        root = mirror(repo, clone_url)
     messages = lambda system, user: [{"role": "system", "content": system}, {"role": "user", "content": user}]
     result = audit.audit_pr(root, base, head,
                             call=lambda s, u: llm(messages(s, u), as_json=False, usage=usage),
@@ -423,6 +478,11 @@ def worker():
         function, *args = QUEUE.get()
         repo, sha = args[0], args[2] if function is review_pr else args[1]
         context = CONTEXT_PR if function is review_pr else CONTEXT
+        chave = f"{repo}@{sha[:7]}"
+        inicio = time.monotonic()
+        with ANDAMENTO_LOCK:
+            ANDAMENTO[chave] = inicio
+        log(f"{chave}: início (fila={QUEUE.qsize()}, workers={WORKERS})")
         try:
             function(*args)
         except Exception as e:
@@ -432,7 +492,11 @@ def worker():
             except Exception as e2:
                 log(f"error status also failed: {e2}")
         finally:
+            with ANDAMENTO_LOCK:
+                ANDAMENTO.pop(chave, None)
             QUEUE.task_done()
+            salva_fila()
+            log(f"{chave}: fim em {time.monotonic() - inicio:.0f}s (fila={QUEUE.qsize()})")
 
 
 # ---------- webhook ----------
@@ -443,6 +507,16 @@ class Webhook(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(text.encode())
+
+    def do_GET(self):
+        if self.path != "/status":
+            return self.reply(404, "not found")
+        corpo = json.dumps(estado(), ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(corpo)))
+        self.end_headers()
+        self.wfile.write(corpo)
 
     def do_POST(self):
         size = int(self.headers.get("Content-Length") or 0)
@@ -457,14 +531,14 @@ class Webhook(BaseHTTPRequestHandler):
         if event == "pull_request":
             pr = pr_to_audit(json.loads(body))
             if pr:
-                QUEUE.put((review_pr, *pr))
+                enfileira(review_pr, *pr)
                 log(f"PR #{pr[1]} queued (queue={QUEUE.qsize()})")
             return self.reply(202, "PR queued" if pr else "PR ignored")
         if event != "push":
             return self.reply(202, f"event {event} ignored")
         new = push_commits(json.loads(body))
         for item in new:
-            QUEUE.put((review_commit, *item))
+            enfileira(review_commit, *item)
         log(f"push: {len(new)} commit(s) queued (queue={QUEUE.qsize()})")
         self.reply(202, f"{len(new)} commit(s) queued")
 
@@ -476,7 +550,9 @@ if __name__ == "__main__":
     (DATA / "reports").mkdir(parents=True, exist_ok=True)
     PRICE = load_price()
     configure_ocr()
-    threading.Thread(target=worker, daemon=True).start()
-    log(f"listening on :{PORT}/webhook; repos={sorted(REPOS)}; model={MODEL} at {LLM_BASE_URL}; "
-        f"price={PRICE}; gate={GATE}; dry_run={DRY_RUN}")
+    retomados = carrega_fila()
+    for _ in range(WORKERS):
+        threading.Thread(target=worker, daemon=True).start()
+    log(f"listening on :{PORT}/webhook and GET /status; repos={sorted(REPOS)}; model={MODEL} at {LLM_BASE_URL}; "
+        f"price={PRICE}; gate={GATE}; dry_run={DRY_RUN}; workers={WORKERS}; retomados={retomados}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Webhook).serve_forever()

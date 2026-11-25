@@ -116,6 +116,11 @@ Prompts: copy of the skill's `auditor-*.md`, under Apache-2.0 (see `prompts/NOTI
    - Events: "Let me select individual events" → **Pushes** and **Pull requests**
 5. Add the repository to `REPOS` (`owner/repo`, comma separated) and restart (`docker compose up -d`).
 6. Test: in Webhooks → Recent Deliveries the `ping` must return 200. After a push, `docker compose logs -f`.
+7. Watch the queue: `curl http://127.0.0.1:8080/status` returns the pending count, what is running (with elapsed
+   seconds) and the last finished review. `WORKERS` (default 1) sets how many reviews run in parallel.
+
+A review of a multi-file branch takes about 10 minutes with `deepseek-flash`; during that time the log now prints
+the start and the end of each commit, so an idle-looking service is a running review, not a stuck one.
 
 GitHub token (`GITHUB_TOKEN`), fine-grained, restricted to the `REPOS` repositories:
 
@@ -143,8 +148,11 @@ Unit tests: `python -m pytest -q test_app.py`.
   does not replace human review.
 - GitHub sends at most 20 commits per push event. In a larger push, only those 20 are reviewed.
 - A force push that rewrites history: the new SHAs are reviewed; the old ones stay in the reports.
-- If the container restarts, queued commits are lost and keep the status "pending". Redeliver the event from
-  GitHub (Recent Deliveries → Redeliver).
+- The queue is persisted in `DATA_DIR/queue.json` and reloaded on start, so a restart resumes what was pending
+  instead of leaving the commit with a "pending" status. A job that was *running* when the container stopped is
+  resumed from the beginning (the review is idempotent: a commit with a report is skipped).
+- Reviews run one at a time per worker (`WORKERS`, default 1): a push with 3 commits waits about 3× the time of
+  one review. More workers run reviews in parallel, at proportional API cost.
 - Measured with `deepseek-flash` on 2026-11-25, one run each:
   - single-file synthetic commit: 34 s, 33.7k tokens;
   - single-file synthetic commit through this code path (ocr call + verification + price lookup): 17.7k tokens,
