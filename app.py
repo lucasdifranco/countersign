@@ -24,6 +24,8 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -241,7 +243,15 @@ def github(method: str, path: str, body: dict):
                                  headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
                                           "Accept": "application/vnd.github+json",
                                           "X-GitHub-Api-Version": "2022-11-28"})
-    urllib.request.urlopen(req, timeout=30).read()
+    for attempt in (1, 2):
+        try:
+            urllib.request.urlopen(req, timeout=30).read()
+            return
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == 2:  # GitHub returns 5xx sporadically: retry once, then give up
+                raise
+            log(f"GitHub {e.code} on {method} {path}; retrying in 2s")
+            time.sleep(2)
 
 
 def status(repo: str, sha: str, state: str, description: str, context: str = CONTEXT):
@@ -361,7 +371,11 @@ def review_commit(repo: str, sha: str, clone_url: str):
         f.write(f"- {datetime.now(timezone.utc):%Y-%m-%d %H:%M} {repo}@{sha[:7]} {state} — {description} · "
                 f"{report['total_tokens']:,} tok · {report['cost_text']}\n")
     if any(f["verification"]["verdict"] != "refuted" for f in findings):
-        github("POST", f"/repos/{repo}/commits/{sha}/comments", {"body": text})
+        # the report and the status are the durable result: a failed comment must not turn a finished review into "error"
+        try:
+            github("POST", f"/repos/{repo}/commits/{sha}/comments", {"body": text})
+        except Exception as e:
+            log(f"{repo}@{sha[:7]} comment failed: {e}")
     status(repo, sha, state, description)
     log(f"{repo}@{sha[:7]}: {state} ({description}, {report['total_tokens']} tokens, {report['cost_text']})")
 
@@ -395,7 +409,10 @@ def review_pr(repo: str, number: int, head: str, base: str, clone_url: str):
                 f"{report['total_tokens']:,} tok · {report['cost_text']}\n")
     # the PR review body is capped at 65536 characters; the full report stays on the server
     body = text if len(text) < 60000 else text[:60000] + f"\n\n… truncated. Full report on the server: {name}.md"
-    github("POST", f"/repos/{repo}/pulls/{number}/reviews", {"body": body, "event": "COMMENT", "commit_id": head})
+    try:
+        github("POST", f"/repos/{repo}/pulls/{number}/reviews", {"body": body, "event": "COMMENT", "commit_id": head})
+    except Exception as e:
+        log(f"{repo}#{number}@{head[:7]} PR review failed: {e}")
     status(repo, head, state, score, CONTEXT_PR)
     log(f"{repo}#{number}@{head[:7]}: audit {state} ({score}, {report['total_tokens']} tokens, "
         f"{report['cost_text']})")

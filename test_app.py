@@ -1,4 +1,4 @@
-import hashlib, hmac, os
+import hashlib, hmac, os, urllib.error
 os.environ.update(WEBHOOK_SECRET="secret", GITHUB_TOKEN="t", LLM_API_KEY="k", REPOS="Org/Repo")
 import app
 
@@ -75,6 +75,35 @@ def test_money_keeps_resolution_on_cheap_reviews():
     assert app.money(None) == "n/a (no price)"
     assert app.money(0.000939) == "$0.000939"
     assert app.money(1.2345) == "$1.2345"
+
+def test_github_retries_once_on_5xx(monkeypatch):
+    calls = []
+    class Ok:
+        def read(self):
+            return b"{}"
+    def fake(req, timeout=0):
+        calls.append(req.method)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, None)
+        return Ok()
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+    app.github("POST", "/x", {})
+    assert calls == ["POST", "POST"]
+
+def test_github_does_not_retry_4xx(monkeypatch):
+    calls = []
+    def fake(req, timeout=0):
+        calls.append(1)
+        raise urllib.error.HTTPError(req.full_url, 422, "bad", {}, None)
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake)
+    try:
+        app.github("POST", "/x", {})
+    except urllib.error.HTTPError as e:
+        assert e.code == 422
+    else:
+        raise AssertionError("4xx must raise")
+    assert len(calls) == 1
 
 import audit
 
