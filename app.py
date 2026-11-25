@@ -48,12 +48,12 @@ SEVERITIES = ["critical", "major", "minor"]
 GATE = os.getenv("GATE", "major")
 DRY_RUN = os.getenv("DRY_RUN") == "1"  # never call GitHub (status/comment go to the log only)
 PORT = int(os.getenv("PORT", 8080))
-CONTEXT = "revisor-commits/review"
+CONTEXT = "countersign/review"
 MAX_BODY = 25 * 1024 * 1024  # GitHub webhook payload ceiling
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPO = re.compile(r"^[\w.-]+/[\w.-]+$")
 
-CONTEXT_PR = "revisor-commits/audit"
+CONTEXT_PR = "countersign/audit"
 AUDIT_BASE = os.getenv("AUDIT_BASE", "main")
 PR_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 
@@ -185,7 +185,7 @@ def load_price() -> dict | None:
     except (OSError, ValueError):
         pass
     try:
-        request = urllib.request.Request(MODELS_DEV, headers={"User-Agent": "revisor-commits"})
+        request = urllib.request.Request(MODELS_DEV, headers={"User-Agent": "countersign"})
         catalog = json.load(urllib.request.urlopen(request, timeout=30))
         price = pick_price(catalog, LLM_PROVIDER, MODEL)
         if price:

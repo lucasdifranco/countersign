@@ -1,4 +1,7 @@
-# revisor-commits
+# countersign
+
+> To countersign is to sign a document someone else already signed, as confirmation.
+> This is that, for code: every finding is verified before it reaches your PR — and every review comes with a receipt.
 
 Automated code review for every push, running on **your own LLM key** — any OpenAI-compatible endpoint — and
 recording the **token and dollar cost of every review**.
@@ -12,7 +15,7 @@ Two jobs in one webhook service:
   (Elephant-Goldfish): three isolated auditors, a synthesis, and one verifier per finding.
 
 ```
-GitHub push ──webhook (HMAC)──> revisor-commits (Docker)
+GitHub push ──webhook (HMAC)──> countersign (Docker)
                                  ├─ status "pending" on the commit
                                  ├─ git fetch (bare mirror) + worktree at the commit
                                  ├─ ocr review --commit <sha>            (your model)
@@ -84,7 +87,7 @@ target = diff merge-base(base)..head + reading list (changed files + up to 8 fil
    ├─ 3 isolated auditors in parallel: comprehension, correctness, contract (no PR title, no description)
    ├─ synthesis: merges, never creates a finding or changes a severity -> A1..An (JSON)
    ├─ 1 isolated verifier per finding (reading only, a different path from the auditor)
-   └─ PR review + status "revisor-commits/audit" (failure only with a confirmed Blocker)
+   └─ PR review + status "countersign/audit" (failure only with a confirmed Blocker)
       + data/audits/<repo>/pr-<n>-<sha>.{json,md}
 ```
 
@@ -122,6 +125,9 @@ GitHub token (`GITHUB_TOKEN`), fine-grained, restricted to the `REPOS` repositor
 
 The commit comment also needs write permission. Check the GitHub documentation for which permission
 `POST /repos/{owner}/{repo}/commits/{sha}/comments` requires from fine-grained tokens (not verified here).
+
+Status checks it publishes, if you want them required in branch protection: `countersign/review` (commit) and
+`countersign/audit` (PR).
 
 ## Test without touching GitHub
 

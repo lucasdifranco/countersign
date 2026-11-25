@@ -1,5 +1,5 @@
 services:
-  revisor-commits:
+  countersign:
     build: .
     restart: unless-stopped
     env_file: .env
