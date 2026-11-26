@@ -118,6 +118,10 @@ Prompts: copy of the skill's `auditor-*.md`, under Apache-2.0 (see `prompts/NOTI
 6. Test: in Webhooks → Recent Deliveries the `ping` must return 200. After a push, `docker compose logs -f`.
 7. Watch the queue: `curl http://127.0.0.1:8080/status` returns the pending count, what is running (with elapsed
    seconds) and the last finished review. `WORKERS` (default 1) sets how many reviews run in parallel.
+8. Set `PUBLIC_URL` to the address the service answers on (for example `http://pampa01:8090` on a tailnet, or the
+   tunnel URL). The commit status then carries a `target_url`, which is what makes the **Details** link on the
+   check open the report; without `PUBLIC_URL` the status has no link. Reports are served at
+   `/reports/<owner>/<repo>/<sha>` (and `pr-<n>-<sha>` for the audit).
 
 A review of a multi-file branch takes about 10 minutes with `deepseek-flash`; during that time the log now prints
 the start and the end of each commit, so an idle-looking service is a running review, not a stuck one.

@@ -132,3 +132,12 @@ def test_audit_markdown_shows_cost():
                         findings, {"paraphrases": "p"}, False,
                         usage(total=1200, cached=300, cost=0.0005, cost_text="$0.0005"))
     assert "Tokens: 1,200 (300 cached)" in md and "$0.0005" in md and "contract (ran)" in md
+
+
+def test_relatorio_url(monkeypatch):
+    """O link "Details" do status é o target_url: só existe quando PUBLIC_URL está configurado."""
+    monkeypatch.setattr(app, "PUBLIC_URL", "https://cs.example")
+    assert app.relatorio_url("org/repo", SHA) == f"https://cs.example/reports/org/repo/{SHA}"
+    monkeypatch.setattr(app, "PUBLIC_URL", "")
+    assert app.relatorio_url("org/repo", SHA) is None
+

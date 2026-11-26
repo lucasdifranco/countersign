@@ -17,6 +17,7 @@ Bring your own key: LLM_BASE_URL, LLM_API_KEY and LLM_MODEL are the only LLM set
 import base64
 import hashlib
 import hmac
+import html as html_lib
 import json
 import os
 import queue
@@ -58,6 +59,13 @@ REPO = re.compile(r"^[\w.-]+/[\w.-]+$")
 CONTEXT_PR = "countersign/audit"
 AUDIT_BASE = os.getenv("AUDIT_BASE", "main")
 PR_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
+# endereço público do serviço, para o link "Details" do status apontar ao relatório
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+
+
+def relatorio_url(repo: str, nome: str) -> str | None:
+    """URL pública do relatório de um commit (sha) ou de uma PR (pr-<n>-<sha>)."""
+    return f"{PUBLIC_URL}/reports/{repo}/{nome}" if PUBLIC_URL else None
 
 QUEUE: "queue.Queue[tuple]" = queue.Queue()  # (function, *args)
 QUEUE_FILE = DATA / "queue.json"
@@ -65,6 +73,7 @@ FILA_LOCK = threading.Lock()
 MIRROR_LOCK = threading.Lock()  # fetch no espelho é o único passo compartilhado entre workers
 ANDAMENTO: dict[str, float] = {}
 ANDAMENTO_LOCK = threading.Lock()
+EM_CURSO: dict[str, tuple] = {}  # job retirado da fila: fica no arquivo até terminar
 WORKERS = max(1, int(os.getenv("WORKERS", "1")))
 
 
@@ -73,9 +82,11 @@ def log(msg: str):
 
 
 def salva_fila() -> None:
-    """Fila em disco: reinício do container não perde push já recebido (webhook não é reenviado)."""
+    """Fila em disco: reinício do container não perde push já recebido (webhook não é reenviado).
+    Inclui o job em execução, senão um restart no meio do review perde justamente esse commit."""
     with FILA_LOCK:
-        dados = [{"funcao": f.__name__, "args": list(a)} for f, *a in list(QUEUE.queue)]
+        itens = list(QUEUE.queue) + list(EM_CURSO.values())
+        dados = [{"funcao": f.__name__, "args": list(a)} for f, *a in itens]
         tmp = QUEUE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
         tmp.replace(QUEUE_FILE)
@@ -307,9 +318,13 @@ def github(method: str, path: str, body: dict):
             time.sleep(2)
 
 
-def status(repo: str, sha: str, state: str, description: str, context: str = CONTEXT):
-    github("POST", f"/repos/{repo}/statuses/{sha}",
-           {"state": state, "context": context, "description": description[:140]})
+def status(repo: str, sha: str, state: str, description: str, context: str = CONTEXT, alvo: str | None = None):
+    """O link "Details" do check na GitHub é o target_url; sem ele o status não abre nada."""
+    corpo = {"state": state, "context": context, "description": description[:140]}
+    link = alvo or relatorio_url(repo, sha)
+    if link:
+        corpo["target_url"] = link
+    github("POST", f"/repos/{repo}/statuses/{sha}", corpo)
 
 
 # ---------- git ----------
@@ -440,7 +455,8 @@ def review_pr(repo: str, number: int, head: str, base: str, clone_url: str):
     if (folder / f"{name}.json").exists():
         log(f"{repo}#{number}@{head[:7]} already audited")
         return
-    status(repo, head, "pending", f"auditing with {MODEL}", CONTEXT_PR)
+    status(repo, head, "pending", f"auditing with {MODEL}", CONTEXT_PR,
+           alvo=relatorio_url(repo, name))
     usage = Usage()
     with MIRROR_LOCK:
         root = mirror(repo, clone_url)
@@ -468,7 +484,7 @@ def review_pr(repo: str, number: int, head: str, base: str, clone_url: str):
         github("POST", f"/repos/{repo}/pulls/{number}/reviews", {"body": body, "event": "COMMENT", "commit_id": head})
     except Exception as e:
         log(f"{repo}#{number}@{head[:7]} PR review failed: {e}")
-    status(repo, head, state, score, CONTEXT_PR)
+    status(repo, head, state, score, CONTEXT_PR, alvo=relatorio_url(repo, name))
     log(f"{repo}#{number}@{head[:7]}: audit {state} ({score}, {report['total_tokens']} tokens, "
         f"{report['cost_text']})")
 
@@ -482,6 +498,8 @@ def worker():
         inicio = time.monotonic()
         with ANDAMENTO_LOCK:
             ANDAMENTO[chave] = inicio
+            EM_CURSO[chave] = (function, *args)
+        salva_fila()
         log(f"{chave}: início (fila={QUEUE.qsize()}, workers={WORKERS})")
         try:
             function(*args)
@@ -494,6 +512,7 @@ def worker():
         finally:
             with ANDAMENTO_LOCK:
                 ANDAMENTO.pop(chave, None)
+                EM_CURSO.pop(chave, None)
             QUEUE.task_done()
             salva_fila()
             log(f"{chave}: fim em {time.monotonic() - inicio:.0f}s (fila={QUEUE.qsize()})")
@@ -508,7 +527,42 @@ class Webhook(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(text.encode())
 
+    def html(self, code: int, corpo: str):
+        dados = corpo.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(dados)))
+        self.end_headers()
+        self.wfile.write(dados)
+
+    def relatorio(self):
+        """Renderiza o relatório em Markdown como página: é o destino do link "Details" do status."""
+        partes = self.path.split("?")[0].strip("/").split("/")
+        if len(partes) != 4:
+            return self.reply(404, "not found")
+        _, dono, repo, nome = partes
+        if not (re.fullmatch(r"[\w.-]+", dono) and re.fullmatch(r"[\w.-]+", repo)
+                and re.fullmatch(r"[0-9a-f]{7,40}|pr-\d+-[0-9a-f]{7}", nome)):
+            return self.reply(404, "not found")
+        alvo = None
+        for pasta in ("reports", "audits"):
+            candidato = DATA / pasta / f"{dono}__{repo}" / f"{nome}.md"
+            if candidato.is_file():
+                alvo = candidato
+                break
+        estilo = ("<style>body{font:15px/1.5 ui-sans-serif,system-ui;margin:2rem auto;max-width:60rem;"
+                  "padding:0 1rem;color:#111}pre{white-space:pre-wrap;font:13px/1.45 ui-monospace,monospace;"
+                  "background:#f6f6f4;padding:1rem;border-radius:8px;overflow-x:auto}a{color:#0550ae}</style>")
+        if alvo is None:
+            return self.html(200, f"<!doctype html><meta charset=utf-8>{estilo}"
+                                  f"<h1>Sem relatório ainda</h1><p>Revisão em andamento para <code>{dono}/{repo}@{nome}</code>.</p>")
+        texto = html_lib.escape(alvo.read_text(encoding="utf-8"))
+        return self.html(200, f"<!doctype html><meta charset=utf-8>{estilo}<h1>{dono}/{repo}@{nome}</h1>"
+                              f"<pre>{texto}</pre>")
+
     def do_GET(self):
+        if self.path.startswith("/reports/"):
+            return self.relatorio()
         if self.path != "/status":
             return self.reply(404, "not found")
         corpo = json.dumps(estado(), ensure_ascii=False).encode()
