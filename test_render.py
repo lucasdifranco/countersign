@@ -54,7 +54,21 @@ def test_pagina_tem_titulo_e_estado():
     assert "1.000 tokens" in pagina
 
 
+def test_confirmed_antes_de_incerto():
+    """Confirmados primeiro, inconclusivos depois, dentro do bloco de achados."""
+    corpo = render.corpo(RELATORIO)
+    achados = corpo[corpo.index('<section class="achados">'):]
+    assert achados.index("Confirmados") < achados.index("Inconclusivos")
+    assert achados.index('class="major"') < achados.index('class="minor"')
+    assert achados.count("<article") == 2
+    assert achados.count('class="chip confirmed"') == 1 and achados.count('class="chip uncertain"') == 1
+
+
+def test_grade_de_achados():
+    assert 'class="achados"' in render.corpo(RELATORIO)
+
+
 def test_paragrafo_e_lista():
     corpo = render.corpo("Texto solto.\n\n- um\n- dois\n")
-    assert "<p>Texto solto.</p>" in corpo
+    assert '<p class="intro">Texto solto.</p>' in corpo
     assert "<ul><li>um</li><li>dois</li></ul>" in corpo

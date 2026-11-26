@@ -28,16 +28,20 @@ CSS = """
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--fundo); color: var(--texto);
   font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 78ch; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+main { max-width: min(1500px, 96vw); margin: 0 auto; padding: 2.5rem clamp(1rem, 2vw, 2.5rem) 4rem; }
 a { color: var(--acento); }
 header { border-bottom: 1px solid var(--linha); padding-bottom: 1.25rem; margin-bottom: 1.75rem; }
-header h1 { margin: 0 0 .35rem; font-size: 1.5rem; letter-spacing: -.01em; }
-header .meta { color: var(--fraco); font-size: .875rem; display: flex; flex-wrap: wrap; gap: .35rem 1rem; }
+header h1 { margin: 0 0 .35rem; font-size: 1.6rem; letter-spacing: -.01em; }
+header .meta { color: var(--fraco); font-size: .9rem; display: flex; flex-wrap: wrap; gap: .35rem 1.1rem; align-items: center; }
+.intro { max-width: 90ch; }
+.achados { display: grid; grid-template-columns: repeat(auto-fill, minmax(540px, 1fr)); gap: 1rem; align-items: start; }
+.achados .grupo { grid-column: 1 / -1; margin: .5rem 0 -.25rem; font-size: .8rem; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--fraco); }
 .selo { display: inline-flex; align-items: center; gap: .35rem; border-radius: 999px; padding: .1rem .6rem;
   font-size: .78rem; font-weight: 600; border: 1px solid currentColor; }
 .selo.failure { color: var(--critico); } .selo.success { color: var(--ok); } .selo.pending, .selo.error { color: var(--maior); }
 article { border: 1px solid var(--linha); border-left: 3px solid var(--menor); border-radius: 10px;
-  padding: 1rem 1.15rem; margin: 0 0 1rem; background: var(--cartao); }
+  padding: 1rem 1.15rem; margin: 0; background: var(--cartao); min-width: 0; }
 article.critical { border-left-color: var(--critico); }
 article.major { border-left-color: var(--maior); }
 article h2 { font-size: 1rem; margin: 0 0 .5rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; }
@@ -151,9 +155,22 @@ def _corpo_achado(texto: str) -> str:
     return "".join(pedacos)
 
 
+ORDEM_VEREDITO = {"confirmed": 0, "uncertain": 1, "refuted": 2}
+ROTULO_VEREDITO = {"confirmed": "Confirmados", "uncertain": "Inconclusivos", "refuted": "Refutados"}
+
+
+def _cartao(severidade: str, veredito: str, caminho: str, texto: str) -> str:
+    return (
+        f'<article class="{severidade}">'
+        f'<h2><span class="chip {veredito}">{veredito}</span>'
+        f'<span class="caminho">{_inline(caminho)}</span></h2>{_corpo_achado(texto)}</article>'
+    )
+
+
 def corpo(md: str) -> str:
-    """Markdown do relatório como HTML (sem a página em volta)."""
-    saida = []
+    """Markdown do relatório como HTML: texto na ordem, achados em grade por veredito
+    (confirmados primeiro, depois inconclusivos, refutados por último)."""
+    saida, achados = [], []
     for tipo, dado in _blocos(md):
         if tipo == "titulo":
             nivel, texto = dado
@@ -163,14 +180,19 @@ def corpo(md: str) -> str:
         elif tipo == "lista":
             saida.append("<ul>" + "".join(f"<li>{_inline(x)}</li>" for x in dado) + "</ul>")
         elif tipo == "paragrafo":
-            saida.append("<p>" + _inline(dado) + "</p>")
+            saida.append('<p class="intro">' + _inline(dado) + "</p>")
         else:
-            severidade, veredito, caminho, texto = dado
-            saida.append(
-                f'<article class="{severidade}">'
-                f'<h2><span class="chip {veredito}">{veredito}</span>'
-                f'<span class="caminho">{_inline(caminho)}</span></h2>{_corpo_achado(texto)}</article>'
-            )
+            achados.append(dado)
+    if achados:
+        achados.sort(key=lambda a: ORDEM_VEREDITO.get(a[1], 9))  # sort estável: ordem interna preservada
+        blocos, grupo = [], None
+        for severidade, veredito, caminho, texto in achados:
+            if veredito != grupo:
+                blocos.append(f'<p class="grupo">{ROTULO_VEREDITO.get(veredito, veredito)} '
+                              f'({sum(1 for a in achados if a[1] == veredito)})</p>')
+                grupo = veredito
+            blocos.append(_cartao(severidade, veredito, caminho, texto))
+        saida.append('<section class="achados">' + "".join(blocos) + "</section>")
     return "".join(saida)
 
 
