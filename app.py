@@ -17,7 +17,6 @@ Bring your own key: LLM_BASE_URL, LLM_API_KEY and LLM_MODEL are the only LLM set
 import base64
 import hashlib
 import hmac
-import html as html_lib
 import json
 import os
 import queue
@@ -33,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import audit
+import render
 
 DATA = Path(os.getenv("DATA_DIR", "/data"))
 SECRET = os.environ["WEBHOOK_SECRET"].encode()
@@ -536,7 +536,7 @@ class Webhook(BaseHTTPRequestHandler):
         self.wfile.write(dados)
 
     def relatorio(self):
-        """Renderiza o relatório em Markdown como página: é o destino do link "Details" do status."""
+        """Página do relatório: é o destino do link "Details" do status."""
         partes = self.path.split("?")[0].strip("/").split("/")
         if len(partes) != 4:
             return self.reply(404, "not found")
@@ -550,15 +550,19 @@ class Webhook(BaseHTTPRequestHandler):
             if candidato.is_file():
                 alvo = candidato
                 break
-        estilo = ("<style>body{font:15px/1.5 ui-sans-serif,system-ui;margin:2rem auto;max-width:60rem;"
-                  "padding:0 1rem;color:#111}pre{white-space:pre-wrap;font:13px/1.45 ui-monospace,monospace;"
-                  "background:#f6f6f4;padding:1rem;border-radius:8px;overflow-x:auto}a{color:#0550ae}</style>")
+        titulo = f"{dono}/{repo}@{nome[:7]}"
         if alvo is None:
-            return self.html(200, f"<!doctype html><meta charset=utf-8>{estilo}"
-                                  f"<h1>Sem relatório ainda</h1><p>Revisão em andamento para <code>{dono}/{repo}@{nome}</code>.</p>")
-        texto = html_lib.escape(alvo.read_text(encoding="utf-8"))
-        return self.html(200, f"<!doctype html><meta charset=utf-8>{estilo}<h1>{dono}/{repo}@{nome}</h1>"
-                              f"<pre>{texto}</pre>")
+            return self.html(200, render.pagina(titulo, f"## Sem relatório ainda\n\n"
+                                                     f"Revisão em andamento para `{dono}/{repo}@{nome}`."))
+        resumo = None
+        json_alvo = alvo.with_suffix(".json")
+        if json_alvo.is_file():
+            try:
+                resumo = json.loads(json_alvo.read_text(encoding="utf-8"))
+            except Exception:
+                resumo = None
+        commit_url = f"https://github.com/{dono}/{repo}/commit/{nome}" if re.fullmatch(r"[0-9a-f]{40}", nome) else None
+        return self.html(200, render.pagina(titulo, alvo.read_text(encoding="utf-8"), resumo, commit_url))
 
     def do_GET(self):
         if self.path.startswith("/reports/"):
